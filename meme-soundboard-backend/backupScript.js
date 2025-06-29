@@ -1,8 +1,7 @@
 const admin = require('./firebaseAdmin');
 const logger = require('./logger');
 
-// TODO: Replace with your Google Cloud Storage bucket name
-const BUCKET_NAME = 'your-firestore-backup-bucket';
+const BUCKET_NAME = 'meme-app-eabc1-backups';
 
 const performFirestoreBackup = async () => {
   try {

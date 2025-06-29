@@ -61,7 +61,11 @@ functions/node_modules/
 meme-sound-backend/node_modules/
 meme-sound-backend/.env
 
+# Firebase Admin SDK key
+meme-app-eabc1-firebase-adminsdk-fbsvc-5e9420564d.json
+
 # Other ignores
 *.tmp
 *.bak
 *.swp
+"meme-app-eabc1-firebase-adminsdk-fbsvc-5e9420564d.json" 

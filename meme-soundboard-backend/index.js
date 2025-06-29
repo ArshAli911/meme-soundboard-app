@@ -4,9 +4,11 @@ const Sentry = require('@sentry/node');
 const Tracing = require('@sentry/tracing');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const multer = require('multer'); // Import multer
+const { Storage } = require('@google-cloud/storage'); // Import Google Cloud Storage
 const { audioTranscodeQueue } = require('./queue'); // Import the queue
 const logger = require('./logger'); // Import the logger
-const admin = require('./firebaseAdmin'); // Import firebase-admin
+const { admin, serviceAccount } = require('./firebaseAdmin'); // Import firebase-admin and serviceAccount
 
 // Assuming you would fetch this from an environment variable or a config file
 const SENTRY_DSN_BACKEND = 'https://examplePublicKey@o0.ingest.sentry.io/1';
@@ -47,6 +49,41 @@ app.use(Sentry.Handlers.tracingHandler());
 app.use(cors());
 app.use(express.json());
 
+// Configure Multer for in-memory storage
+const upload = multer({ storage: multer.memoryStorage() });
+
+// Initialize Firebase Storage with the admin SDK
+const storage = new Storage({
+  projectId: serviceAccount.project_id,
+  credentials: {
+    client_email: serviceAccount.client_email,
+    private_key: serviceAccount.private_key,
+  },
+});
+const bucket = storage.bucket(`${serviceAccount.project_id}.appspot.com`); // Default bucket name
+
+// Middleware to verify Firebase ID tokens
+const authenticateToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ message: 'Authorization header missing' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  if (!token) {
+    return res.status(401).json({ message: 'Token missing from Authorization header' });
+  }
+
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    req.user = decodedToken; // Attach user data to request
+    next();
+  } catch (error) {
+    logger.error('Error verifying Firebase ID token:', error);
+    return res.status(403).json({ message: 'Invalid or expired token' });
+  }
+};
+
 // Endpoint to register Expo Push Tokens
 app.post('/api/register-push-token', authenticateToken, async (req, res) => {
   const { expoPushToken } = req.body;
@@ -71,56 +108,104 @@ app.post('/api/register-push-token', authenticateToken, async (req, res) => {
   }
 });
 
-// Placeholder for your CDN base URL
-const CDN_BASE_URL = 'https://your-cdn-domain.com/sounds/';
-
-const MOCK_SOUNDS = [
-  { id: '1', name: 'Funny Laugh', category: 'Funny', url: `${CDN_BASE_URL}augh-sound-effect.mp3` },
-  { id: '2', name: 'Sad Trombone', category: 'Instruments', url: `${CDN_BASE_URL}sad-trombone.mp3` },
-  { id: '3', name: 'Womp Womp', category: 'Funny', url: `${CDN_BASE_URL}womp-womp.mp3` },
-  { id: '4', name: 'Air Horn', category: 'Memes', url: `${CDN_BASE_URL}air-horn.mp3` },
-  { id: '5', name: 'Record Scratch', category: 'Sound Effects', url: `${CDN_BASE_URL}record-scratch.mp3` },
-  { id: '6', name: 'Nope', category: 'Funny', url: `${CDN_BASE_URL}nope.mp3` },
-];
-
-// Middleware to verify Firebase ID tokens
-const authenticateToken = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    return res.status(401).json({ message: 'Authorization header missing' });
-  }
-
-  const token = authHeader.split(' ')[1];
-  if (!token) {
-    return res.status(401).json({ message: 'Token missing from Authorization header' });
-  }
-
+// Protected endpoint to upload a sound
+app.post('/api/sounds/upload', authenticateToken, upload.single('audioFile'), async (req, res) => {
   try {
-    const decodedToken = await admin.auth().verifyIdToken(token);
-    req.user = decodedToken; // Attach user data to request
-    next();
+    if (!req.file) {
+      // logger.warn('[/api/sounds/upload] No file uploaded');
+      // return res.status(400).json({ error: 'No audio file provided.' });
+    }
+
+    const { name, category, imageUrl } = req.body;
+
+    if (!name || !category) {
+      logger.warn('[/api/sounds/upload] Missing name or category in request body');
+      return res.status(400).json({ error: 'Sound name and category are required.' });
+    }
+
+    // Create a new blob in the bucket and upload the file data
+    const uniqueFileName = `${Date.now()}_${req.file.originalname}`;
+    const file = bucket.file(`sounds/${uniqueFileName}`);
+
+    const stream = file.createWriteStream({
+      metadata: {
+        contentType: req.file.mimetype,
+      },
+      resumable: false, // For smaller files, resumable uploads might not be necessary
+    });
+
+    stream.on('error', (err) => {
+      logger.error('Error uploading to Firebase Storage:', err);
+      return res.status(500).json({ error: 'Failed to upload audio file.' });
+    });
+
+    stream.on('finish', async () => {
+      // Make the file public (optional, depends on your bucket's security rules)
+      await file.makePublic();
+
+      const publicUrl = `https://storage.googleapis.com/${bucket.name}/${file.name}`;
+
+      const firestore = admin.firestore();
+      const newSoundRef = firestore.collection('sounds').doc();
+
+      const newSound = {
+        id: newSoundRef.id,
+        name,
+        category,
+        url: publicUrl,
+        imageUrl: imageUrl || null,
+        uploadedBy: req.user.uid, // Assuming req.user.uid is available from authentication
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      await newSoundRef.set(newSound);
+
+      logger.info(`[/api/sounds/upload] Sound uploaded and metadata saved: ${newSound.name} (${newSound.id})`);
+      res.status(201).json({ message: 'Sound uploaded successfully', sound: newSound });
+    });
+
+    stream.end(req.file.buffer);
   } catch (error) {
-    logger.error('Error verifying Firebase ID token:', error);
-    return res.status(403).json({ message: 'Invalid or expired token' });
+    logger.error('Error handling sound upload:', error);
+    res.status(500).json({ error: 'Failed to upload sound.' });
   }
-};
+});
 
 // Public endpoint to get all sounds
-app.get('/api/sounds', (req, res) => {
-  logger.info('[/api/sounds] Fetched all sounds');
-  res.json(MOCK_SOUNDS);
+app.get('/api/sounds', async (req, res) => {
+  try {
+    const firestore = admin.firestore();
+    const snapshot = await firestore.collection('sounds').get();
+    const sounds = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+    logger.info('[/api/sounds] Fetched all sounds from Firestore');
+    res.json(sounds);
+  } catch (error) {
+    logger.error('Error fetching sounds from Firestore:', error);
+    res.status(500).json({ error: 'Failed to fetch sounds.' });
+  }
 });
 
 // Protected endpoint for search (example)
-app.get('/api/sounds/search', authenticateToken, (req, res) => {
+app.get('/api/sounds/search', authenticateToken, async (req, res) => {
   const query = req.query.q ? req.query.q.toString().toLowerCase() : '';
   logger.info(`[/api/sounds/search] Search query: ${query}, by user: ${req.user.uid}`);
 
-  const filteredSounds = MOCK_SOUNDS.filter(sound =>
-    sound.name.toLowerCase().includes(query) ||
-    sound.category.toLowerCase().includes(query)
-  );
-  res.json(filteredSounds);
+  try {
+    const firestore = admin.firestore();
+    // This is a basic search. For more advanced full-text search, consider dedicated solutions.
+    const snapshot = await firestore.collection('sounds')
+                                     .where('name', '>=', query)
+                                     .where('name', '<=', query + '\uf8ff')
+                                     .get();
+    const filteredSounds = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.json(filteredSounds);
+  } catch (error) {
+    logger.error('Error during sound search:', error);
+    res.status(500).json({ error: 'Failed to perform search.' });
+  }
 });
 
 // Protected endpoint to enqueue an audio transcoding job (example)
@@ -163,11 +248,4 @@ app.use(function onError(err, req, res, next) {
 
 app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
-  // Example of capturing a test error in the backend
-  try {
-    throw new Error("This is a test error from the backend!");
-  } catch (error) {
-    Sentry.captureException(error);
-    logger.error('Caught test error:', error);
-  }
 }); 

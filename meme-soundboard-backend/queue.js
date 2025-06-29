@@ -7,7 +7,33 @@ const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
 const connection = new IORedis({
   host: REDIS_HOST,
   port: REDIS_PORT,
+  maxRetriesPerRequest: null, // REQUIRED for BullMQ
+  retryDelayOnFailover: 100,
   maxRetriesPerRequest: null,
+  enableReadyCheck: false,
+  maxRetriesPerRequest: null,
+  // Optional: add more options if you have a specific need, but do not set maxRetriesPerRequest to anything else
+});
+
+// Test the connection
+connection.on('connect', () => {
+  console.log('Connected to Redis successfully');
+});
+
+connection.on('error', (err) => {
+  console.error('Redis connection error:', err);
+});
+
+connection.on('ready', () => {
+  console.log('Redis is ready to accept commands');
+});
+
+connection.on('close', () => {
+  console.log('Redis connection closed');
+});
+
+connection.on('reconnecting', () => {
+  console.log('Redis reconnecting...');
 });
 
 // Create a queue for audio transcoding jobs
