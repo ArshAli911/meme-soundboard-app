@@ -69,3 +69,7 @@ meme-app-eabc1-firebase-adminsdk-fbsvc-5e9420564d.json
 *.bak
 *.swp
 "meme-app-eabc1-firebase-adminsdk-fbsvc-5e9420564d.json" 
+
+
+# Ignore Firebase secrets
+meme-app-eabc1-firebase-adminsdk-fbsvc-5e9420564d.json
